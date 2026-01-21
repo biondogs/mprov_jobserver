@@ -43,6 +43,7 @@ class UpdateImage(JobServerPlugin):
   def handle_jobs(self):
 
     imageDetails = self.imageDetails
+    imgDir = self.imageDir + '/' + self.imageDetails['slug']
 
     baseURL=imageDetails['osdistro']['baserepo']['repo_package_url']
     print(baseURL)
@@ -182,10 +183,14 @@ class UpdateImage(JobServerPlugin):
     # build the filesystem.
     print('dnf -y --installroot=' + imgDir + ' --releasever=' + str(imageDetails['osdistro']['version'])  + ' --nogpgcheck groupinstall \'Minimal Install\'')
     if os.system('dnf -y --installroot=' + imgDir + ' --releasever=' + str(imageDetails['osdistro']['version'])  + ' --nogpgcheck groupinstall \'Minimal Install\''):
-      print("Error: unable to genergate image filesystem.")
-      self.js.update_job_status(self.jobModule, 3, jobid=self.jobid, jobquery='jobserver=' + str(self.js.id) + '&status=2')
-      self.threadOk = False
-      return
+      # if this fails, lets try something slightly different...
+      print(f'chroot {imgDir} dnf -y --releasever=' + str(imageDetails['osdistro']['version'])  + ' --nogpgcheck groupinstall \'Minimal Install\'')
+      if os.system(f'chroot {imgDir} dnf -y --releasever=' + str(imageDetails['osdistro']['version'])  + ' --nogpgcheck groupinstall \'Minimal Install\''):
+
+        print("Error: unable to genergate image filesystem.")
+        self.js.update_job_status(self.jobModule, 3, jobid=self.jobid, jobquery='jobserver=' + str(self.js.id) + '&status=2')
+        self.threadOk = False
+        return
     
     # here we are going to disable all the default repos again just to make sure.
     disable_repos = ['appstream', 'baseos', 'epel', 'extras', 'powertools', 'crb']
@@ -205,10 +210,12 @@ class UpdateImage(JobServerPlugin):
 
     print(f'chroot {imgDir} dnf -y  --releasever=' + str(imageDetails['osdistro']['version'])  + f'  install kernel wget jq parted-devel gcc grub2 mdadm rsync grub2-efi-x64 grub2-efi-x64-modules dosfstools ipmitool python3-dnf-plugin-versionlock.noarch' + pythonpkgs)
     if os.system(f'chroot {imgDir}  dnf -y  --releasever=' + str(imageDetails['osdistro']['version'])  + f'  install kernel wget jq parted-devel gcc grub2 mdadm rsync grub2-efi-x64 grub2-efi-x64-modules dosfstools ipmitool python3-dnf-plugin-versionlock.noarch' + pythonpkgs):
-      print("Error unable to install required packages into image filesystem")
-      self.js.update_job_status(self.jobModule, 3, jobid=self.jobid, jobquery='jobserver=' + str(self.js.id) + '&status=2')
-      self.threadOk = False
-      return
+      # if this fails, let's try to rebuild the rpm db
+      if os.system(f'chroot {imgDir} rpm --rebuilddb'):
+        print("Error unable to install required packages into image filesystem")
+        self.js.update_job_status(self.jobModule, 3, jobid=self.jobid, jobquery='jobserver=' + str(self.js.id) + '&status=2')
+        self.threadOk = False
+        return
 
     # set up a version lock on the kernel
     os.system(f'chroot {imgDir} dnf -y versionlock kernel*')
