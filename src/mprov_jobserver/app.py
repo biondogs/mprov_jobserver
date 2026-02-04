@@ -1,4 +1,3 @@
-
 from datetime import datetime, timezone
 import importlib
 import yaml
@@ -14,367 +13,394 @@ from .plugins.plugin import JobServerPlugin
 import mprov_jobserver.plugins
 import glob
 import multiprocessing
+from mprov_jobserver.enums import JobStatus
 
 
-class JobServer ():
-  mprovURL = "http://127.0.0.1:8080/"
-  running = True
-  session = requests.Session()
-  job_module_plugins = {}
-  heartbeatInterval = 10
-  configfile="/etc/mprov/jobserver.yaml"
-  ip_address = ""
-  myaddress = ""
-  loadmon=True
-  plugin_dir = os.path.dirname(os.path.realpath(__file__)) + '/plugins/'
-  jobmodules = []
-  running_threads = {}
-  config_data = {}
-  apikey = ""
-  sessionOk = False
-  id = -1
-  runonce = False
-  register = True
-  firstrun = True
+class JobServer:
+    mprovURL = "http://127.0.0.1:8080/"
+    running = True
+    session = requests.Session()
+    job_module_plugins = {}
+    heartbeatInterval = 10
+    configfile = "/etc/mprov/jobserver.yaml"
+    ip_address = ""
+    myaddress = ""
+    loadmon = True
+    plugin_dir = os.path.dirname(os.path.realpath(__file__)) + "/plugins/"
+    jobmodules = []
+    running_threads = {}
+    config_data = {}
+    apikey = ""
+    sessionOk = False
+    id = -1
+    runonce = False
+    register = True
+    firstrun = True
 
-  def __init__(self, **kwargs):
-    print("mProv Job Server Starting.")
+    def __init__(self, **kwargs):
+        print("mProv Job Server Starting.")
 
+        # if we get passed in a config file, let's use that
+        if "configfile" in kwargs:
+            self.configfile = kwargs["configfile"]
 
-    # if we get passed in a config file, let's use that
-    if 'configfile' in kwargs:
-      self.configfile = kwargs['configfile']
-    
-    # load our config
-    self.load_config()
-    
-    # set runonce if someone sent it to us.
-    if 'runonce' in kwargs:
-      self.runonce = kwargs['runonce']
-      
-      
-    if '-d' in set(sys.argv):
-      self.register = False
+        # load our config
+        self.load_config()
 
+        # set runonce if someone sent it to us.
+        if "runonce" in kwargs:
+            self.runonce = kwargs["runonce"]
 
-    if '-m' in set(sys.argv):
-      # -m overrides whatever is in the config.
-      # so we will re-write the self.jobmodules list
-      self.jobmodules= sys.argv[sys.argv.index('-m')+1].split(',')
-      # we are also going to specify runonce
-      self.runonce=True
-      # we also don't want to register with mPCC
-      self.register = False
+        if "-d" in set(sys.argv):
+            self.register = False
 
-    # Authenticat to the Control Center and start a session
-    print("mProv Job Server authenticating.")
-    if not self.startSession():
-        print("Error: Unable to log into mProv Control Center.",file=sys.stderr)
+        if "-m" in set(sys.argv):
+            # -m overrides whatever is in the config.
+            # so we will re-write the self.jobmodules list
+            self.jobmodules = sys.argv[sys.argv.index("-m") + 1].split(",")
+            # we are also going to specify runonce
+            self.runonce = True
+            # we also don't want to register with mPCC
+            self.register = False
 
+        # Authenticat to the Control Center and start a session
+        print("mProv Job Server authenticating.")
+        if not self.startSession():
+            print("Error: Unable to log into mProv Control Center.", file=sys.stderr)
 
-    # Load Plugins. (plugins register job modules.)
-    self.load_plugins()
+        # Load Plugins. (plugins register job modules.)
+        self.load_plugins()
 
-    # register the server.
-    self.register_server()
+        # register the server.
+        self.register_server()
 
-    pass
+        pass
 
-  def yaml_include(self, loader, node):
-      # Get the path out of the yaml file
-    file_name = os.path.join(os.path.dirname(loader.name), node.value)
-    
-    # we have a glob, so we will iterate.
-    result = {}
-    for file in glob.glob(file_name):
-      with open(file) as inputfile:
-        result.update(yaml.load(inputfile, Loader=yaml.FullLoader)[0])
-    return result
+    def yaml_include(self, loader, node):
+        # Get the path out of the yaml file
+        file_name = os.path.join(os.path.dirname(loader.name), node.value)
 
+        # we have a glob, so we will iterate.
+        result = {}
+        for file in glob.glob(file_name):
+            with open(file) as inputfile:
+                result.update(yaml.load(inputfile, Loader=yaml.FullLoader)[0])
+        return result
 
+    def load_config(self):
+        # load the config yaml
+        # print(self.configfile)
+        yaml.add_constructor("!include", self.yaml_include)
+        if not (
+            os.path.isfile(self.configfile) and os.access(self.configfile, os.R_OK)
+        ):
+            self.configfile = os.getcwd() + "/jobserver.yaml"
+        # print(self.configfile)
+        if not (
+            os.path.isfile(self.configfile) and os.access(self.configfile, os.R_OK)
+        ):
+            print("Error: Unable to find a working config file.")
+            print("Try passing one in with the '-c' option.")
+            sys.exit(1)
 
-  def load_config(self):
-    # load the config yaml
-    # print(self.configfile)
-    yaml.add_constructor("!include", self.yaml_include)
-    if not(os.path.isfile(self.configfile) and os.access(self.configfile, os.R_OK)):
-      self.configfile = os.getcwd() + "/jobserver.yaml"
-    # print(self.configfile)
-    if not(os.path.isfile(self.configfile) and os.access(self.configfile, os.R_OK)):
-      print("Error: Unable to find a working config file.")
-      print("Try passing one in with the '-c' option.")
-      sys.exit(1)
+        with open(self.configfile, "r") as yamlfile:
+            self.config_data = yaml.load(yamlfile, Loader=yaml.FullLoader)
 
+        # flatten the config space
+        result = {}
+        for entry in self.config_data:
+            result.update(entry)
+        self.config_data = result
 
-    with open(self.configfile, "r") as yamlfile:
-      self.config_data = yaml.load(yamlfile, Loader=yaml.FullLoader)
+        # pp = pprint.PrettyPrinter(indent=2,width=100,)
+        # pp.pprint(self.config_data)
+        # map the global config on to our object
+        for config_entry in self.config_data["global"].keys():
+            try:
+                getattr(self, config_entry)
+                if config_entry == "mprovURL":
+                    # add a trailing slash if one doesn't exist.
+                    if self.config_data["global"][config_entry][-1] != "/":
+                        self.config_data["global"][config_entry] += "/"
+                setattr(self, config_entry, self.config_data["global"][config_entry])
+            except:
+                print(
+                    "Error: "
+                    + config_entry
+                    + " is not a valid config entry in 'global'.",
+                    file=sys.stderr,
+                )
+                sys.exit(1)
 
-    # flatten the config space
-    result = {}
-    for entry in self.config_data:
-      result.update(entry)
-    self.config_data = result
-  
-    # pp = pprint.PrettyPrinter(indent=2,width=100,)
-    # pp.pprint(self.config_data)
-    # map the global config on to our object
-    for config_entry in self.config_data['global'].keys():
-      try:
-        getattr(self, config_entry)
-        if config_entry == "mprovURL":
-          # add a trailing slash if one doesn't exist.
-          if self.config_data['global'][config_entry][-1] != "/":
-            self.config_data['global'][config_entry] += "/"
-        setattr(self, config_entry, self.config_data['global'][config_entry])
-      except:
-        print("Error: " + config_entry + " is not a valid config entry in 'global'.", file=sys.stderr)
-        sys.exit(1)
+    def load_plugins(self):
+        if self.jobmodules is None:
+            print("Error: You must specify at least 1 jobmodule!")
+            sys.exit(1)
+        # Load plugins set in the config file.
+        for mod in self.jobmodules:
+            # self.job_module_plugins[mod] = importlib.import_module('.' + mod, 'mprov.mprov_jobserver.plugins')
+            attribute = getattr(mprov_jobserver.plugins, mod.replace("-", "_"))
+            # attribute = getattr(attribute, attribute_name.replace('-', '_'))
+            if isclass(attribute) and issubclass(attribute, JobServerPlugin):
+                globals()[mod.replace("-", "_")] = attribute
 
-  def load_plugins(self):
-    if self.jobmodules is None:
-      print("Error: You must specify at least 1 jobmodule!")
-      sys.exit(1)
-    # Load plugins set in the config file.
-    for mod in self.jobmodules:
-      # self.job_module_plugins[mod] = importlib.import_module('.' + mod, 'mprov.mprov_jobserver.plugins')
-      attribute = getattr(mprov_jobserver.plugins, mod.replace('-', '_'))
-        # attribute = getattr(attribute, attribute_name.replace('-', '_'))
-      if isclass(attribute) and issubclass(attribute, JobServerPlugin):
-        globals()[mod.replace('-', '_')] = attribute
-            
-  def stop(self):
-    self.running = False
+    def stop(self):
+        self.running = False
 
-  def start(self):
-    # Start processing jobs.
-    # this strange looking loop allows us to die quickly on SIGTERM
-    counter=self.heartbeatInterval
-    while(self.running):
-      if self.sessionOk is False:
-        self.startSession()
-      else:
-        if(counter == self.heartbeatInterval):
-          for mod in self.jobmodules:
+    def start(self):
+        # Start processing jobs.
+        # this strange looking loop allows us to die quickly on SIGTERM
+        counter = self.heartbeatInterval
+        while self.running:
+            if self.sessionOk is False:
+                self.startSession()
+            else:
+                if counter == self.heartbeatInterval:
+                    for mod in self.jobmodules:
+                        # first check if the thread is done running.
+                        if mod in self.running_threads:
+                            # check if this thread is still running
+                            if not self.running_threads[mod].is_alive():
+                                # print ("Thread " + mod + " ended.")
+                                # if it's done running remove it.
+                                self.running_threads[mod].handled = True
+                                del self.running_threads[mod]
+
+                        # if a thread of this plugin is not running, start one.
+                        if mod not in self.running_threads:
+                            # print ("Starting mod... " + mod)
+                            # attempt to reload the module, just in case
+                            # print(f"Starting {mod.replace('-', '_')}")
+                            if (
+                                f"mprov_jobserver.plugins.{mod.replace('-', '_')}"
+                                in sys.modules
+                            ):
+                                # reload
+                                # print(f"Reload mprov_jobserver.plugins.{mod.replace('-', '_')}")
+                                importlib.reload(
+                                    sys.modules[
+                                        f"mprov_jobserver.plugins.{mod.replace('-', '_')}"
+                                    ]
+                                )
+
+                            mod_cls = getattr(
+                                mprov_jobserver.plugins, mod.replace("-", "_")
+                            )
+                            mod_cls = getattr(mod_cls, mod.replace("-", "_"))
+                            self.running_threads[mod] = mod_cls(self)
+                            self.running_threads[mod].start()
+
+                    # print(".", sep=None)
+                    if not self.runonce:
+                        self.register_server()
+                    counter = 0
+                counter += 1
+                time.sleep(1)
+                self.firstrun = False
+                if self.runonce:
+                    print("Job Server in 'runonce' mode.")
+                    self.running = False
+        print("\nJob Server Exiting...")
+        # wait for any jobmodules to complete.
+        for mod in self.jobmodules:
             # first check if the thread is done running.
-            if mod in self.running_threads: 
-              # check if this thread is still running
-              if not self.running_threads[mod].is_alive() :
-                # print ("Thread " + mod + " ended.")
-                # if it's done running remove it.
-                self.running_threads[mod].handled = True
-                del self.running_threads[mod]
+            if mod in self.running_threads:
+                # check if this thread is still running
+                # print("\tWaiting on thread " + mod)
+                self.running_threads[mod].join()
 
-            # if a thread of this plugin is not running, start one.
-            if mod not in self.running_threads:
-              # print ("Starting mod... " + mod)
-              # attempt to reload the module, just in case
-              #print(f"Starting {mod.replace('-', '_')}")
-              if f"mprov_jobserver.plugins.{mod.replace('-', '_')}" in sys.modules:
-                #reload
-                #print(f"Reload mprov_jobserver.plugins.{mod.replace('-', '_')}")
-                importlib.reload(sys.modules[f"mprov_jobserver.plugins.{mod.replace('-', '_')}"])
+        return 0
 
-              mod_cls = getattr(mprov_jobserver.plugins, mod.replace('-', '_'))
-              mod_cls = getattr(mod_cls, mod.replace('-', '_'))
-              self.running_threads[mod] = mod_cls(self)
-              self.running_threads[mod].start()
-              
-          #print(".", sep=None)
-          if not self.runonce:
-            self.register_server()
-          counter=0
-        counter+=1
-        time.sleep(1)
-        self.firstrun = False
-        if self.runonce:
-          print("Job Server in 'runonce' mode.")
-          self.running = False
-    print("\nJob Server Exiting...")
-    # wait for any jobmodules to complete.
-    for mod in self.jobmodules:
-        # first check if the thread is done running.
-        if mod in self.running_threads: 
-          # check if this thread is still running
-          # print("\tWaiting on thread " + mod)
-          self.running_threads[mod].join()
-          
-    
-    return 0
-
-
-  
-  def update_job_status(self, job_module, status, jobid=None,jobquery=""):
-    data = {
-      'pk': job_module,
-      'status': status,
-    }
-    if(status == 2) :
-      # we use UTC here because django in the mPCC will interpret that correctly.
-      # setting the job to running
-      data['start_time'] = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
-      data['end_time'] = None
-    elif(status == 3) or (status == 4) :
-      # job failed
-      data['end_time'] = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
-    if jobid is not None:
-      # get the specific job status
-      queryURL = self.mprovURL + 'jobs/' + str(jobid) + '/'
-    elif jobquery != "":
-      queryURL = self.mprovURL + 'jobs/?' + jobquery
-    else:
-      queryURL = self.mprovURL + 'jobs/?search=' + job_module
-    response = self.session.get( queryURL )
-    if response.status_code <= 199 or response.status_code >=300:
-
-        print(f"Error: Server returned error {response.status_code}. ",file=sys.stderr)
-        return False
-    try:
-      if (response.json() == [] ):
-        return False
-    except:
-      print(f"There was an error parsing output from the mPCC.  Output: ")
-      print(f"{response.text}")
-      return False
-    # print(job_module)
-    # print(response.json())
-    updateCount = 0
-    jobs = response.json()
-    # single objects still need to be in a list.
-    if type(jobs) != list:
-      jobs = [jobs]
-    for job in jobs:
-
-      # no need to update if our status hasn't changed.
-      # print("\t" + str(job['id']))
-      if(job['status'] == status ):
-        continue
-
-      # if we are in an end state, don't update.
-      if(job['status'] == 3) or (job['status'] == 4):
-        continue
-
-      data['id'] = job['id']
-      data['jobserver'] = self.id
-      # print(data)
-      response = self.session.patch(self.mprovURL + 'jobs/' + str(data['id']) + '/', data=json.dumps(data))
-      updateCount += 1
-
-      if response.status_code == 400:
-        print("Oops!, JobID: " + str(data['id']))
-        print(response.json())
-        continue
-
-    return updateCount
-    # return True
-
-    #print(job_module + " " + str(status))
-    pass
-
-  def register_server(self):
-    if not self.register:
-      return
-    # get my hostname from platform
-    myHostname = platform.node()
-    if "." in myHostname:
-      # remove the domain if one exists
-      myHostname, _ = myHostname.split(".", 1)
-
-    # setup or server info register payload
-    data = {
-        'name': myHostname,
-        'address': self.ip_address,
-        'jobmodules': self.jobmodules,
-        'one_minute_load': os.getloadavg()[2]
-    }
-    if data['one_minute_load'] >= multiprocessing.cpu_count() and self.config_data['loadmon']:
-      print("Not Registering, high load.")
-      return
-    # print(self.config_data)
-    if 'mprov-webserver' in self.config_data:
-    # if  self.config_data['mprov-webserver']:
-      if 'serverPort' in self.config_data['mprov-webserver']:
-        # print(self.config_data['mprov-webserver']['serverPort'])
-        data['port'] = self.config_data['mprov-webserver']['serverPort']
-      else: 
-        data['port'] = 8080
-    
-    #print(data)
-    # post the response (maybe should be put?) to the server.
-    try: 
-      response = self.session.post(self.mprovURL + 'jobservers/', data=json.dumps(data), )
-      
-    except:
-      self.sessionOk = False
-      self.startSession()
-      return
-    
-    if response.status_code == 400:
-        print("Error: Server returned error 400. Make sure your specified jobmodules exist.",file=sys.stderr)
-        self.sessionOk = False
-        return
-    if response.status_code == 500:
-        print("Error: The mPCC had an internal server error.")
+    def update_job_status(self, job_module, status, jobid=None, jobquery=""):
+        data = {
+            "pk": job_module,
+            "status": status,
+        }
+        if status == JobStatus.RUNNING:
+            # we use UTC here because django in the mPCC will interpret that correctly.
+            # setting the job to running
+            data["start_time"] = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+            data["end_time"] = None
+        elif (status == JobStatus.FAILED) or (status == JobStatus.SUCCESS):
+            # job failed or succeeded
+            data["end_time"] = datetime.now().strftime("%Y-%m-%dT%H:%M:%S")
+        if jobid is not None:
+            # get the specific job status
+            queryURL = self.mprovURL + "jobs/" + str(jobid) + "/"
+        elif jobquery != "":
+            queryURL = self.mprovURL + "jobs/?" + jobquery
+        else:
+            queryURL = self.mprovURL + "jobs/?search=" + job_module
+        response = self.session.get(queryURL)
+        if response.status_code <= 199 or response.status_code >= 300:
+            print(
+                f"Error: Server returned error {response.status_code}. ",
+                file=sys.stderr,
+            )
+            return False
         try:
-          result = json.loads(response.json())
-        except: 
-          print("Error: And we were unable to load json from the response.")
-          print(f"Error: so here is the raw response: {response.text}")
-          sys.exit(1)
-        print(f"Error: The mPCCC said: \"{result['msg']}\"")
-        sys.exit(1)
-    # pp = pprint.PrettyPrinter(indent=2,width=100,)
-    # pp.pprint(vars(response))
-    # # print(response.text)
-    try: 
-      # check if we are actually json
-      _ = response.json()
-    except:
-      print("Error: mPCC gave us an invalid reply.")
-      print(response.text)
-      return
-    
-    if type(response.json()) is dict:
-      print("Error: Invalid response from mPCC")
-      print(response.json())
-      return
-    # print(response.json())
-    result = json.loads(response.json())
-    
-    # grab our id from the MPCC
-    self.id = result['pk']
+            if response.json() == []:
+                return False
+        except:
+            print(f"There was an error parsing output from the mPCC.  Output: ")
+            print(f"{response.text}")
+            return False
+        # print(job_module)
+        # print(response.json())
+        updateCount = 0
+        jobs = response.json()
+        # single objects still need to be in a list.
+        if type(jobs) != list:
+            jobs = [jobs]
+        for job in jobs:
+            # no need to update if our status hasn't changed.
+            # print("\t" + str(job['id']))
+            if job["status"] == status:
+                continue
 
-    print("Heartbeat - " + datetime.now().strftime("%d/%m/%Y %H:%M:%S"))
+            # if we are in an end state, don't update.
+            if (job["status"] == JobStatus.FAILED) or (
+                job["status"] == JobStatus.SUCCESS
+            ):
+                continue
 
+            data["id"] = job["id"]
+            data["jobserver"] = self.id
+            # print(data)
+            response = self.session.patch(
+                self.mprovURL + "jobs/" + str(data["id"]) + "/", data=json.dumps(data)
+            )
+            updateCount += 1
 
-  def startSession(self):
-    
-    self.session.headers.update({
-      'Authorization': 'Api-Key ' + self.apikey,
-      'Content-Type': 'application/json'
-      })
+            if response.status_code == 400:
+                print("Oops!, JobID: " + str(data["id"]))
+                print(response.json())
+                continue
 
-    # test connectivity
-    try:
-      response = self.session.get(self.mprovURL, stream=True)
-    except:
-      print("Error: Communication error to the server.  Retrying.", file=sys.stderr)
-      self.sessionOk = False
-      time.sleep(10)
-      return
-    self.sessionOk = True
-    if self.myaddress is not None:
-      if self.myaddress != '':
-        self.ip_address = self.myaddress
-      else:
-        print("Warning: No address set in config, attempting autodetection.  This may not work right...")
-        # get the sock from the session
-        s = socket.fromfd(response.raw.fileno(), socket.AF_INET, socket.SOCK_STREAM)
-        # get the address from the socket
-        sockinfo = s.getsockname()
-        self.ip_address=sockinfo[0]
-      
-    # if we get a response.status_code == 200, we're ok.  If not,
-    # our auth failed.
-    return response.status_code == 200
+        return updateCount
+        # return True
 
- 
+        # print(job_module + " " + str(status))
+        pass
+
+    def register_server(self):
+        if not self.register:
+            return
+        # get my hostname from platform
+        myHostname = platform.node()
+        if "." in myHostname:
+            # remove the domain if one exists
+            myHostname, _ = myHostname.split(".", 1)
+
+        # setup or server info register payload
+        data = {
+            "name": myHostname,
+            "address": self.ip_address,
+            "jobmodules": self.jobmodules,
+            "one_minute_load": os.getloadavg()[2],
+        }
+        if (
+            data["one_minute_load"] >= multiprocessing.cpu_count()
+            and self.config_data["loadmon"]
+        ):
+            print("Not Registering, high load.")
+            return
+        # print(self.config_data)
+        if "mprov-webserver" in self.config_data:
+            # if  self.config_data['mprov-webserver']:
+            if "serverPort" in self.config_data["mprov-webserver"]:
+                # print(self.config_data['mprov-webserver']['serverPort'])
+                data["port"] = self.config_data["mprov-webserver"]["serverPort"]
+            else:
+                data["port"] = 8080
+
+        # print(data)
+        # post the response (maybe should be put?) to the server.
+        try:
+            response = self.session.post(
+                self.mprovURL + "jobservers/",
+                data=json.dumps(data),
+            )
+
+        except:
+            self.sessionOk = False
+            self.startSession()
+            return
+
+        if response.status_code == 400:
+            print(
+                "Error: Server returned error 400. Make sure your specified jobmodules exist.",
+                file=sys.stderr,
+            )
+            self.sessionOk = False
+            return
+        if response.status_code == 500:
+            print("Error: The mPCC had an internal server error.")
+            try:
+                result = json.loads(response.json())
+            except:
+                print("Error: And we were unable to load json from the response.")
+                print(f"Error: so here is the raw response: {response.text}")
+                sys.exit(1)
+            print(f'Error: The mPCCC said: "{result["msg"]}"')
+            sys.exit(1)
+        # pp = pprint.PrettyPrinter(indent=2,width=100,)
+        # pp.pprint(vars(response))
+        # # print(response.text)
+        try:
+            # check if we are actually json
+            _ = response.json()
+        except:
+            print("Error: mPCC gave us an invalid reply.")
+            print(response.text)
+            return
+
+        if type(response.json()) is dict:
+            print("Error: Invalid response from mPCC")
+            print(response.json())
+            return
+        # print(response.json())
+        result = json.loads(response.json())
+
+        # grab our id from the MPCC
+        self.id = result["pk"]
+
+        print("Heartbeat - " + datetime.now().strftime("%d/%m/%Y %H:%M:%S"))
+
+    def startSession(self):
+        self.session.headers.update(
+            {
+                "Authorization": "Api-Key " + self.apikey,
+                "Content-Type": "application/json",
+            }
+        )
+
+        # test connectivity
+        try:
+            response = self.session.get(self.mprovURL, stream=True)
+        except:
+            print(
+                "Error: Communication error to the server.  Retrying.", file=sys.stderr
+            )
+            self.sessionOk = False
+            time.sleep(10)
+            return
+        self.sessionOk = True
+        if self.myaddress is not None:
+            if self.myaddress != "":
+                self.ip_address = self.myaddress
+            else:
+                print(
+                    "Warning: No address set in config, attempting autodetection.  This may not work right..."
+                )
+                # get the sock from the session
+                s = socket.fromfd(
+                    response.raw.fileno(), socket.AF_INET, socket.SOCK_STREAM
+                )
+                # get the address from the socket
+                sockinfo = s.getsockname()
+                self.ip_address = sockinfo[0]
+
+        # if we get a response.status_code == 200, we're ok.  If not,
+        # our auth failed.
+        return response.status_code == 200
