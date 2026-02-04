@@ -66,7 +66,7 @@ class JobServerPlugin(threading.Thread):
                     config_entry,
                     self.js.config_data[self.jobModule][config_entry],
                 )
-            except:
+            except AttributeError:
                 print(
                     "Error: Unknown config entry "
                     + config_entry

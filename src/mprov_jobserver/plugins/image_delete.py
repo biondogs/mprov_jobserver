@@ -1,4 +1,5 @@
 from .plugin import JobServerPlugin
+from mprov_jobserver.enums import JobStatus
 import os
 import shutil
 
@@ -25,7 +26,7 @@ class image_delete(JobServerPlugin):
             # grab the params.
             try:
                 params = job["params"]
-            except:
+            except (KeyError, TypeError):
                 print(
                     "Error: Image Delete Job with no imageID present, cannot parse params"
                 )
