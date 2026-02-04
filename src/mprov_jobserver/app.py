@@ -36,6 +36,7 @@ class JobServer:
     runonce = False
     register = True
     firstrun = True
+    request_timeout = 30
 
     def __init__(self, **kwargs):
         print("mProv Job Server Starting.")
