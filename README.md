@@ -67,13 +67,15 @@ Job server takes a few command line arguments.  Global arguments are
 
 - -r Runs the jobserver in 'runonce' mode.  The job server will run any of the job modules listed once then exit.
 - -d Tells the job server not to register with the mPCC.  This is useful only when running the `script-runner` module to run post-boot or image-gen scripts.
+- -c <configfile> Tells the job server to use an alternate config file.  Defaults to `/etc/mprov/jobserver.yaml`.
+- -m <module1,module2,...> Overrides the jobmodules listed in the config file, running only the comma separated list given here.
 
 Some plugins also use commandline arguments.
 
 ### script-runner args
 The `script-runner` job module will take the following arguments:
 - -i <systemimage-ID> This is the id of the system image you are going to run scripts against.  Mutually exclusive with -s
-- -s <system-hostname> The host name of the system you are running the scripts against.
+- -s Runs the scripts against the system the job server is running on.  Takes no argument — the job server uses the local hostname.  Mutually exclusive with -i
 - -b     Runs scripts in post-boot mode.
 - -r (Global Option) The script-runner must be run in `runonce` mode only.  It is probably wise to also pass -d
 - -d (Global Option) The script-runner will not register as a job server with mPCC.
